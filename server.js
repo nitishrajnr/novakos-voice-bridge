@@ -212,3 +212,61 @@ server.listen(PORT, function() {
     console.log('Ready for calls');
     console.log('');
 });
+
+// ─── Debug Endpoints ─────────────────────────────────────────────
+app.get('/version', function(req, res) {
+    res.json({ version: '2.0', endpoint: 'agents/stream', auth: 'access_token' });
+});
+
+app.get('/test-cartesia', async function(req, res) {
+    try {
+        var token = await getAccessToken();
+        var url = 'wss://api.cartesia.ai/agents/stream/' + AGENT_ID;
+        
+        var result = await new Promise(function(resolve) {
+            var ws = new WebSocket(url, {
+                headers: {
+                    'Authorization': 'Bearer ' + token,
+                    'Cartesia-Version': '2025-04-16',
+                }
+            });
+            
+            var timeout = setTimeout(function() {
+                ws.close();
+                resolve({ status: 'timeout', msg: 'No response in 5s' });
+            }, 5000);
+            
+            ws.on('open', function() {
+                ws.send(JSON.stringify({
+                    event: 'start',
+                    config: { input_format: 'mulaw_8000' },
+                }));
+            });
+            
+            ws.on('message', function(data) {
+                try {
+                    var msg = JSON.parse(data.toString());
+                    if (msg.event === 'ack') {
+                        clearTimeout(timeout);
+                        ws.close();
+                        resolve({ status: 'ok', stream_id: msg.stream_id, event: 'ack' });
+                    }
+                } catch(e) {}
+            });
+            
+            ws.on('error', function(err) {
+                clearTimeout(timeout);
+                resolve({ status: 'error', msg: err.message });
+            });
+            
+            ws.on('close', function(code, reason) {
+                clearTimeout(timeout);
+                resolve({ status: 'closed', code: code, reason: reason.toString() });
+            });
+        });
+        
+        res.json(result);
+    } catch(err) {
+        res.json({ status: 'error', msg: err.message });
+    }
+});
