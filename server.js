@@ -42,7 +42,7 @@ app.get('/', function(req, res) {
 });
 
 app.get('/version', function(req, res) {
-    res.json({ version: '3.0', endpoint: 'agents/stream', auth: 'access_token', fix: 'buffer_and_timing' });
+    res.json({ version: '4.0', endpoint: 'agents/stream', auth: 'access_token', fix: 'buffer_and_timing' });
 });
 
 app.get('/last-call', function(req, res) {
@@ -91,19 +91,83 @@ app.post('/voice', function(req, res) {
 var server = http.createServer(app);
 var wss = new WebSocket.Server({ server: server, path: '/media-stream' });
 
-wss.on('connection', async function(twilioWs) {
+wss.on('connection', function(twilioWs) {
     log('[TWILIO] Media stream WebSocket connected');
     lastCallLog = []; // Reset log for new call
     
     var streamSid = null;
     var cartesiaWs = null;
     var cartesiaStreamId = null;
-    var audioBuffer = []; // Buffer audio until streamSid is ready
+     // Buffer audio until streamSid is ready
+    var cartesiaAudioBuffer = []; // Buffer Cartesia audio until streamSid ready
     var mediaOutputCount = 0;
     var mediaInputCount = 0;
+    var twilioMediaQueue = []; // Queue caller audio until Cartesia is ready
     
-    try {
-        var accessToken = await getAccessToken();
+    // SET UP TWILIO HANDLER FIRST (before any async work)
+    twilioWs.on('message', function(message) {
+        try {
+            var msg = JSON.parse(message);
+            
+            if (msg.event === 'connected') {
+                log('[TWILIO] Stream connected');
+                
+            } else if (msg.event === 'start') {
+                streamSid = msg.start.streamSid;
+                log('[TWILIO] Stream STARTED. SID: ' + streamSid);
+                log('[TWILIO] Track: ' + (msg.start.track || 'unknown'));
+                log('[TWILIO] Media format: ' + JSON.stringify(msg.start.mediaFormat || {}));
+                
+                // Flush any buffered Cartesia audio
+                if (cartesiaAudioBuffer.length > 0) {
+                    log('[BUFFER] Flushing ' + cartesiaAudioBuffer.length + ' Cartesia audio chunks');
+                    cartesiaAudioBuffer.forEach(function(payload) {
+                        twilioWs.send(JSON.stringify({
+                            event: 'media',
+                            streamSid: streamSid,
+                            media: { payload: payload }
+                        }));
+                    });
+                    cartesiaAudioBuffer = [];
+                }
+                
+            } else if (msg.event === 'media') {
+                mediaInputCount++;
+                if (mediaInputCount <= 3) {
+                    log('[TWILIO] media #' + mediaInputCount + ' track: ' + msg.media.track + ' len: ' + msg.media.payload.length);
+                }
+                if (mediaInputCount === 100) {
+                    log('[TWILIO] ... received 100 media chunks from caller');
+                }
+                
+                // Forward to Cartesia if ready
+                if (cartesiaWs && cartesiaWs.readyState === 1 && cartesiaStreamId) {
+                    cartesiaWs.send(JSON.stringify({
+                        event: 'media_input',
+                        stream_id: cartesiaStreamId,
+                        media: { payload: msg.media.payload }
+                    }));
+                } else {
+                    twilioMediaQueue.push(msg.media.payload);
+                }
+                
+            } else if (msg.event === 'stop') {
+                log('[TWILIO] Stream STOPPED');
+                log('[SUMMARY] media_output: ' + mediaOutputCount + ', media_input: ' + mediaInputCount);
+                if (cartesiaWs) cartesiaWs.close();
+            }
+        } catch (error) {
+            log('[TWILIO ERROR] ' + error.message);
+        }
+    });
+    
+    twilioWs.on('close', function() {
+        log('[TWILIO] WebSocket CLOSED');
+        if (cartesiaWs) cartesiaWs.close();
+    });
+    
+    // NOW connect to Cartesia (async)
+    getAccessToken().then(function(accessToken) {
         log('[AUTH] Got Cartesia access token');
         
         var cartesiaUrl = 'wss://api.cartesia.ai/agents/stream/' + AGENT_ID;
@@ -134,17 +198,17 @@ wss.on('connection', async function(twilioWs) {
                     cartesiaStreamId = msg.stream_id;
                     log('[CARTESIA] ACK received. Stream: ' + cartesiaStreamId);
                     
-                    // Flush buffered audio
-                    if (streamSid && audioBuffer.length > 0) {
-                        log('[BUFFER] Flushing ' + audioBuffer.length + ' buffered audio chunks');
-                        audioBuffer.forEach(function(payload) {
-                            twilioWs.send(JSON.stringify({
-                                event: 'media',
-                                streamSid: streamSid,
+                    // Flush queued caller audio to Cartesia
+                    if (twilioMediaQueue.length > 0) {
+                        log('[BUFFER] Flushing ' + twilioMediaQueue.length + ' queued caller audio chunks to Cartesia');
+                        twilioMediaQueue.forEach(function(payload) {
+                            cartesiaWs.send(JSON.stringify({
+                                event: 'media_input',
+                                stream_id: cartesiaStreamId,
                                 media: { payload: payload }
                             }));
                         });
-                        audioBuffer = [];
+                        twilioMediaQueue = [];
                     }
                     
                 } else if (msg.event === 'media_output') {
@@ -164,8 +228,8 @@ wss.on('connection', async function(twilioWs) {
                         }));
                     } else if (payload && !streamSid) {
                         // Buffer until streamSid is ready
-                        audioBuffer.push(payload);
-                        if (audioBuffer.length <= 3) {
+                        cartesiaAudioBuffer.push(payload);
+                        if (cartesiaAudioBuffer.length <= 3) {
                             log('[BUFFER] Buffering audio chunk (no streamSid yet)');
                         }
                     }
@@ -201,68 +265,8 @@ wss.on('connection', async function(twilioWs) {
             log('[CARTESIA] Closed (' + code + '): ' + reason);
         });
         
-    } catch (err) {
+    }).catch(function(err) {
         log('[ERROR] Setup failed: ' + err.message);
-    }
-    
-    // Handle Twilio messages
-    twilioWs.on('message', function(message) {
-        try {
-            var msg = JSON.parse(message);
-            
-            if (msg.event === 'connected') {
-                log('[TWILIO] Stream connected');
-                
-            } else if (msg.event === 'start') {
-                streamSid = msg.start.streamSid;
-                log('[TWILIO] Stream STARTED. SID: ' + streamSid);
-                log('[TWILIO] Track: ' + msg.start.track);
-                log('[TWILIO] Media format: ' + JSON.stringify(msg.start.mediaFormat));
-                
-                // Flush any buffered audio from Cartesia
-                if (audioBuffer.length > 0) {
-                    log('[BUFFER] Flushing ' + audioBuffer.length + ' buffered chunks now that streamSid is ready');
-                    audioBuffer.forEach(function(payload) {
-                        twilioWs.send(JSON.stringify({
-                            event: 'media',
-                            streamSid: streamSid,
-                            media: { payload: payload }
-                        }));
-                    });
-                    audioBuffer = [];
-                }
-                
-            } else if (msg.event === 'media') {
-                mediaInputCount++;
-                if (mediaInputCount <= 3) {
-                    log('[TWILIO] media #' + mediaInputCount + ' track: ' + msg.media.track + ' payload len: ' + msg.media.payload.length);
-                }
-                if (mediaInputCount === 100) {
-                    log('[TWILIO] ... received 100 media chunks from caller');
-                }
-                
-                // Forward caller audio to Cartesia
-                if (cartesiaWs && cartesiaWs.readyState === WebSocket.OPEN && cartesiaStreamId) {
-                    cartesiaWs.send(JSON.stringify({
-                        event: 'media_input',
-                        stream_id: cartesiaStreamId,
-                        media: { payload: msg.media.payload }
-                    }));
-                }
-                
-            } else if (msg.event === 'stop') {
-                log('[TWILIO] Stream STOPPED');
-                log('[SUMMARY] media_output sent: ' + mediaOutputCount + ', media_input received: ' + mediaInputCount);
-                if (cartesiaWs) cartesiaWs.close();
-            }
-        } catch (error) {
-            log('[TWILIO ERROR] ' + error.message);
-        }
-    });
-    
-    twilioWs.on('close', function() {
-        log('[TWILIO] WebSocket CLOSED');
-        if (cartesiaWs) cartesiaWs.close();
     });
     
     // Keepalive
