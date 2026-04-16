@@ -41,8 +41,21 @@ app.get('/', function(req, res) {
     res.json({ status: 'ok', service: 'NovakOS Voice Bridge', agent: AGENT_ID });
 });
 
+// Agent registry - maps short names to Cartesia agent IDs
+var AGENTS = {
+    'sthflow': 'agent_ixv6sbS9chQf8CbEEXnmhR',
+    'cos': 'agent_bsa1b2SeZE8x6oHtjakCrt',
+    'sales': 'agent_aJKXhUsi4qGdqU6kMygpT8',
+    'marketing': 'agent_S6CUa3GL8piYs1cxfYtrsw',
+    'finance': 'agent_vvhtfE2sHEWpKwCPUyx5rh',
+    'pm': 'agent_ggMhBefZJvpjkB95aJTgvr',
+    'legal': 'agent_8bmkwExZj69Qy2ZHJz1KVd',
+    'cto': 'agent_NHD6NMYZXCA8B9SqBA3Mgi',
+    'default': AGENT_ID
+};
+
 app.get('/version', function(req, res) {
-    res.json({ version: '4.0', endpoint: 'agents/stream', auth: 'access_token', fix: 'buffer_and_timing' });
+    res.json({ version: '5.0', endpoint: 'agents/stream', agents: Object.keys(AGENTS) });
 });
 
 app.get('/last-call', function(req, res) {
@@ -52,7 +65,7 @@ app.get('/last-call', function(req, res) {
 app.get('/test-cartesia', async function(req, res) {
     try {
         var token = await getAccessToken();
-        var url = 'wss://api.cartesia.ai/agents/stream/' + AGENT_ID;
+        var url = 'wss://api.cartesia.ai/agents/stream/' + currentAgentId;
         var result = await new Promise(function(resolve) {
             var ws = new WebSocket(url, {
                 headers: { 'Authorization': 'Bearer ' + token, 'Cartesia-Version': '2025-04-16' }
@@ -75,13 +88,15 @@ app.get('/test-cartesia', async function(req, res) {
 
 app.post('/voice', function(req, res) {
     var host = req.headers.host;
-    log('[VOICE] Webhook hit. Host: ' + host);
+    // Agent can be specified via query param: /voice?agent=sales
+    var agentKey = req.query.agent || 'default';
+    var agentId = AGENTS[agentKey] || AGENT_ID;
+    log('[VOICE] Webhook hit. Host: ' + host + ' Agent: ' + agentKey + ' (' + agentId + ')');
     
-    // Simple TwiML - just connect the stream
     var twiml = '<?xml version="1.0" encoding="UTF-8"?>' +
         '<Response>' +
         '<Connect>' +
-        '<Stream url="wss://' + host + '/media-stream" />' +
+        '<Stream url="wss://' + host + '/media-stream?agent=' + agentKey + '" />' +
         '</Connect>' +
         '</Response>';
     
@@ -91,8 +106,13 @@ app.post('/voice', function(req, res) {
 var server = http.createServer(app);
 var wss = new WebSocket.Server({ server: server, path: '/media-stream' });
 
-wss.on('connection', function(twilioWs) {
-    log('[TWILIO] Media stream WebSocket connected');
+wss.on('connection', function(twilioWs, req) {
+    // Parse agent from URL query: /media-stream?agent=sales
+    var urlParams = new URL(req.url, 'http://localhost').searchParams;
+    var agentKey = urlParams.get('agent') || 'default';
+    var currentAgentId = AGENTS[agentKey] || AGENT_ID;
+    
+    log('[TWILIO] Media stream connected. Agent: ' + agentKey + ' (' + currentAgentId + ')');
     lastCallLog = []; // Reset log for new call
     
     var streamSid = null;
@@ -170,7 +190,7 @@ wss.on('connection', function(twilioWs) {
     getAccessToken().then(function(accessToken) {
         log('[AUTH] Got Cartesia access token');
         
-        var cartesiaUrl = 'wss://api.cartesia.ai/agents/stream/' + AGENT_ID;
+        var cartesiaUrl = 'wss://api.cartesia.ai/agents/stream/' + currentAgentId;
         log('[CARTESIA] Connecting to: ' + cartesiaUrl);
         
         cartesiaWs = new WebSocket(cartesiaUrl, {
@@ -185,7 +205,7 @@ wss.on('connection', function(twilioWs) {
             cartesiaWs.send(JSON.stringify({
                 event: 'start',
                 config: { input_format: 'mulaw_8000' },
-                metadata: { from: 'twilio-bridge', to: AGENT_ID }
+                metadata: { from: 'twilio-bridge', to: currentAgentId }
             }));
             log('[CARTESIA] Sent start event');
         });
