@@ -1,19 +1,17 @@
 {
-  "name": "twilio-cartesia-bridge",
+  "name": "novakos-voice-bridge",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "description": "NovakOS Voice Bridge - Twilio to Cartesia Line voice agent",
+  "main": "server.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "node server.js"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
+  "engines": {
+    "node": ">=18.0.0"
+  },
   "dependencies": {
-    "@ngrok/ngrok": "^1.7.0",
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
-    "localtunnel": "^2.0.2",
     "twilio": "^5.13.1",
     "ws": "^8.20.0"
   }
