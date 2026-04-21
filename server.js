@@ -13,6 +13,10 @@ const PORT = process.env.PORT || 3000;
 const AGENT_ID = process.env.CARTESIA_AGENT_ID;
 const CARTESIA_API_KEY = process.env.CARTESIA_API_KEY;
 
+// v7.0 — Claude-brain mode for GarmentBridge Talk-to-AI
+const aiBrain = require('./ai-brain');
+aiBrain.mount(app);
+
 // Call log for debugging
 var lastCallLog = [];
 function log(msg) {
@@ -55,7 +59,12 @@ var AGENTS = {
 };
 
 app.get('/version', function(req, res) {
-    res.json({ version: '5.0', endpoint: 'agents/stream', agents: Object.keys(AGENTS) });
+    res.json({
+        version: '7.0',
+        endpoint: 'agents/stream',
+        agents: Object.keys(AGENTS),
+        features: ['cartesia-agents', 'dispatch', 'ai-brain (/ai/*)'],
+    });
 });
 
 app.get('/last-call', function(req, res) {
@@ -300,6 +309,7 @@ wss.on('connection', function(twilioWs, req) {
 });
 
 server.listen(PORT, function() {
-    log('NovakOS Voice Bridge v3.0 running on port ' + PORT);
-    log('Agent: ' + AGENT_ID);
+    log('NovakOS Voice Bridge v7.0 running on port ' + PORT);
+    log('Agent (default): ' + AGENT_ID);
+    log('AI-brain mode: ' + (process.env.ANTHROPIC_API_KEY ? 'enabled' : 'MISSING ANTHROPIC_API_KEY'));
 });

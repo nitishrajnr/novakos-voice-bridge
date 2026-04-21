@@ -16,3 +16,17 @@ services:
         sync: false
       - key: CARTESIA_AGENT_ID
         sync: false
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: CLAUDE_MODEL
+        value: claude-sonnet-4-5-20250929
+      - key: CARTESIA_VOICE_ID
+        value: 3b59a3aa-f616-4501-a365-c1ba7ac37874
+      - key: CARTESIA_MODEL
+        value: sonic-2
+      - key: GB_COMPLETE_URL
+        value: https://garmentbridge.vercel.app/api/voice/complete
+      - key: GB_SHARED_SECRET
+        sync: false
+      - key: MAX_CALL_SECONDS
+        value: "300"
