@@ -88,13 +88,15 @@ const AGENT_CONFIGS = {
     system_prompt: [
       "You are Priya, a Cars24 sales agent. Warm, energetic, consultative — you qualify buyers and guide sellers.",
       "You have access to the caller's lead history and matching inventory in the CARS24 CONTEXT block — use those actual stock IDs, makes, models, hubs.",
-      "Voice-call rules: 1-3 sentences per reply. Conversational, not pushy.",
+      "Voice-call rules: 1-3 sentences per reply, up to 4 when listing car options. Conversational, not pushy.",
       "Your scope: lead qualification (budget, timeline, intent), test-drive booking suggestions, trade-in price-range indication, financing/insurance cross-sell.",
       "HARD RULES:",
       "  - Never give a firm final price — always say 'our valuation team will confirm exact numbers after inspection'.",
       "  - Never promise delivery dates beyond what the data shows.",
       "  - Use loan-words the caller uses (haan, bilkul) but default to English.",
       "  - If the caller wants to escalate, offer to schedule a callback with a human rep.",
+      "  - No markdown, no asterisks, no bullet lists, no emojis, no stage directions. Plain speakable sentences only — this is audio.",
+      "  - Read money as 'six point eight lakh' not '6.8L'. Round politely: '₹680,000' → 'around six point eight lakh'.",
       "End each turn with a next-step offer (e.g. 'shall I check for you?').",
     ].join(" "),
   },
@@ -137,7 +139,13 @@ const AGENT_CONFIGS = {
       "Scope: P&L, EBITDA, gross margin, cash position, loan-book exposure, insurance revenue, refurbishment margins.",
       "Every answer MUST cite an actual number from the CARS24 CONTEXT — round to ₹ Cr or Lakh.",
       "Voice-call: 1-3 sentences per turn. Deliberate, not dramatic.",
-      "HARD RULES: never make forward-looking forecasts beyond 1 month, never disclose competitor financials, never reveal customer-level credit data. On tax/audit queries, punt to Legal.",
+      "HARD RULES:",
+      "  - Never make forward-looking forecasts beyond 1 month.",
+      "  - Never disclose competitor financials.",
+      "  - Never reveal customer-level credit data.",
+      "  - On tax/audit queries, punt to Legal.",
+      "  - No markdown, no asterisks, no bullet lists, no emojis, no stage directions. Plain speakable sentences only — this is audio.",
+      "  - Read rupee figures naturally: 'five thousand four hundred ninety-one crore' → say 'roughly fifty-five hundred crore'. Round for the ear. Never read the minus sign; say 'negative' instead.",
     ].join(" "),
   },
 
@@ -380,6 +388,157 @@ async function fetchCars24Snapshot() {
     tlog("cos-cars24", "[SNAPSHOT ERR] " + e.message);
     return null;
   }
+}
+
+// ===== Sales (Priya) context =====
+// Priya needs concrete rows, not aggregates — so she can cite a specific
+// 2022 Maruti Swift VXI in Gurgaon hub, 18,000 km, ₹6.8L.
+async function fetchSalesContext() {
+  try {
+    const [recentLeads, hotInventory, activeDeals] = await Promise.all([
+      sbGET(
+        "cars24_leads?select=lead_code,customer_name,city,intent,budget_min,budget_max,status,created_at&order=created_at.desc&limit=10"
+      ),
+      sbGET(
+        "cars24_inventory?select=stock_id,make,model,variant,year,km_driven,fuel_type,transmission,hub,price_listed,listed_at&status=eq.listed&order=listed_at.desc&limit=15"
+      ),
+      sbGET(
+        "cars24_sales_pipeline?select=deal_code,stage,expected_close_date,deal_value,salesperson&stage=in.(test_drive,negotiation,financing)&order=updated_at.desc&limit=10"
+      ),
+    ]);
+    return {
+      recent_leads: recentLeads || [],
+      hot_inventory: hotInventory || [],
+      active_deals: activeDeals || [],
+    };
+  } catch (e) {
+    tlog("sales-cars24", "[CTX ERR] " + e.message);
+    return null;
+  }
+}
+
+function salesPreamble(ctx, buyerIntent) {
+  if (!ctx) return "";
+  const lines = [];
+  lines.push(
+    "CARS24 SALES CONTEXT (live rows — cite stock IDs and exact prices when helpful):"
+  );
+  if (buyerIntent) {
+    lines.push(`• Caller's stated intent (from form): "${buyerIntent}"`);
+    lines.push("");
+  }
+  lines.push("HOT INVENTORY (recently listed, available to sell):");
+  for (const c of ctx.hot_inventory.slice(0, 15)) {
+    const km = c.km_driven
+      ? `${Math.round(c.km_driven / 1000)}k km`
+      : "— km";
+    lines.push(
+      `  ${c.stock_id}: ${c.year} ${c.make} ${c.model} ${c.variant || ""} · ${km} · ${c.fuel_type}/${c.transmission} · ${c.hub} hub · ${inr(c.price_listed)}`
+    );
+  }
+  lines.push("");
+  lines.push("RECENT LEADS (last 10):");
+  for (const l of ctx.recent_leads.slice(0, 10)) {
+    const budget =
+      l.budget_min && l.budget_max
+        ? `${inr(l.budget_min)}–${inr(l.budget_max)}`
+        : "—";
+    lines.push(
+      `  ${l.lead_code}: ${l.customer_name} (${l.city}) wants to ${l.intent}, budget ${budget}, status ${l.status}`
+    );
+  }
+  lines.push("");
+  lines.push("ACTIVE DEALS (stage: test_drive / negotiation / financing):");
+  for (const d of ctx.active_deals.slice(0, 10)) {
+    lines.push(
+      `  ${d.deal_code}: ${d.stage}, ${inr(d.deal_value)}, expected close ${d.expected_close_date}, owner ${d.salesperson}`
+    );
+  }
+  lines.push("");
+  lines.push(
+    "RULE: if buyer asks for something NOT in HOT INVENTORY above, say exactly: 'let me flag that to our stock team — they'll call you back within 2 hours'. Never invent a car."
+  );
+  return lines.join("\n");
+}
+
+// ===== Finance (Vikram) context =====
+async function fetchFinanceContext() {
+  try {
+    const [finance6mo, latestOps, pipelineDeals] = await Promise.all([
+      sbGET("cars24_finance_metrics?select=*&order=month.desc&limit=6"),
+      sbGET(
+        "cars24_operations?select=hub,date,cars_sold,cars_procured,deliveries&order=date.desc&limit=18"
+      ),
+      sbGET("cars24_sales_pipeline?select=stage,deal_value&limit=50"),
+    ]);
+    return {
+      finance_6mo: finance6mo || [],
+      latest_ops: latestOps || [],
+      pipeline_deals: pipelineDeals || [],
+    };
+  } catch (e) {
+    tlog("finance-cars24", "[CTX ERR] " + e.message);
+    return null;
+  }
+}
+
+function financePreamble(ctx) {
+  if (!ctx) return "";
+  const lines = [];
+  lines.push(
+    "CARS24 FINANCE CONTEXT (live — cite specific months and round to ₹ Cr/L):"
+  );
+  lines.push("");
+  lines.push("FINANCE METRICS (last 6 months, newest first):");
+  for (const m of ctx.finance_6mo) {
+    const monthLabel = String(m.month || "").slice(0, 7);
+    lines.push(
+      `  ${monthLabel}: revenue ${inr(m.revenue)} · COGS ${inr(m.cogs)} · gross margin ${inr(m.gross_margin)} · opex ${inr(m.opex)} · EBITDA ${inr(m.ebitda)} · cash ${inr(m.cash_position)} · loan book ${inr(m.loan_portfolio)} · insurance rev ${inr(m.insurance_revenue)} · refurb rev ${inr(m.refurb_revenue)} · cars sold ${m.cars_sold} · ASP ${inr(m.avg_selling_price)}`
+    );
+  }
+  // EBITDA trend — state direction unambiguously so the model can't mis-read
+  if (ctx.finance_6mo.length >= 2) {
+    const cur = Number(ctx.finance_6mo[0].ebitda);
+    const prior = Number(ctx.finance_6mo[1].ebitda);
+    const delta = cur - prior;
+    const direction = delta < 0 ? "WORSENED" : "IMPROVED";
+    lines.push(
+      `  EBITDA direction MoM: ${direction}. EBITDA moved from ${inr(prior)} (prior month) to ${inr(cur)} (current month). Net change ${inr(delta)} (negative means worse).`
+    );
+  }
+  lines.push("");
+  lines.push("PIPELINE SNAPSHOT (50 most recent deals):");
+  const stageAgg = {};
+  for (const d of ctx.pipeline_deals) {
+    const row = stageAgg[d.stage] || { count: 0, value: 0 };
+    row.count += 1;
+    row.value += Number(d.deal_value || 0);
+    stageAgg[d.stage] = row;
+  }
+  for (const [stage, row] of Object.entries(stageAgg)) {
+    lines.push(
+      `  ${stage}: ${row.count} deals · total value ${inr(row.value)}`
+    );
+  }
+  lines.push("");
+  lines.push("OPERATIONS (last 18 hub-days, for unit-economics context):");
+  const byHub = {};
+  for (const o of ctx.latest_ops) {
+    byHub[o.hub] = byHub[o.hub] || { sold: 0, procured: 0, deliveries: 0 };
+    byHub[o.hub].sold += Number(o.cars_sold || 0);
+    byHub[o.hub].procured += Number(o.cars_procured || 0);
+    byHub[o.hub].deliveries += Number(o.deliveries || 0);
+  }
+  for (const [hub, agg] of Object.entries(byHub)) {
+    lines.push(
+      `  ${hub}: sold ${agg.sold} · procured ${agg.procured} · delivered ${agg.deliveries}`
+    );
+  }
+  lines.push("");
+  lines.push(
+    "RULE: never forecast beyond 1 month. Never disclose competitor financials. Never reveal customer-level credit data."
+  );
+  return lines.join("\n");
 }
 
 function cars24PreambleFromSnapshot(snap) {
@@ -628,6 +787,22 @@ function mount(app, { cacheAudio }) {
         const snap = await fetchCars24Snapshot();
         s.context = { cars24: snap };
         preamble = cars24PreambleFromSnapshot(snap);
+      } else if (context) {
+        s.context = context;
+      }
+    } else if (agent.id === "sales-cars24") {
+      if (fetch_live) {
+        const ctx = await fetchSalesContext();
+        s.context = { sales: ctx };
+        preamble = salesPreamble(ctx, context?.buyer_intent);
+      } else if (context) {
+        s.context = context;
+      }
+    } else if (agent.id === "finance-cars24") {
+      if (fetch_live) {
+        const ctx = await fetchFinanceContext();
+        s.context = { finance: ctx };
+        preamble = financePreamble(ctx);
       } else if (context) {
         s.context = context;
       }
