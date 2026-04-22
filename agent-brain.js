@@ -799,13 +799,14 @@ function playAndHangupTwiml(host, audioId) {
 function gatherTwiml({ host, agentId, call_id, playAudioId, fallbackSpeak }) {
   const actionUrl =
     "/agents/" + encodeURIComponent(agentId) + "/turn?call_id=" + encodeURIComponent(call_id);
-  // STT tuning: `phone_call` model handles Indian English accents more reliably than
-  // `experimental_conversations`. Fixed speechTimeout avoids premature cutoffs.
+  // STT tuning: `phone_call` model is better for Indian accents than `experimental_conversations`,
+  // but keep `speechTimeout="auto"` and `enhanced="false"` to match the snappy Arjun-morning feel.
+  // Auto VAD cuts off ~400-700ms after user stops, vs fixed 2s which felt laggy on the 17:32 call.
   const gatherOpen =
     '<Gather input="speech" action="' +
     actionUrl +
-    '" method="POST" language="en-IN" speechTimeout="2" ' +
-    'speechModel="phone_call" actionOnEmptyResult="true" timeout="8" enhanced="true">';
+    '" method="POST" language="en-IN" speechTimeout="auto" ' +
+    'speechModel="phone_call" actionOnEmptyResult="true" timeout="8">';
   let inner = "";
   if (playAudioId) {
     inner = "<Play>https://" + host + "/ai/audio/" + playAudioId + ".mp3</Play>";
