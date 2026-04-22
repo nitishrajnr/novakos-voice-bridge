@@ -19,7 +19,7 @@ const crypto = require('crypto');
 
 const CARTESIA_API_KEY = process.env.CARTESIA_API_KEY;
 const CARTESIA_VOICE_ID = process.env.CARTESIA_VOICE_ID || '3b59a3aa-f616-4501-a365-c1ba7ac37874';
-const CARTESIA_MODEL = process.env.CARTESIA_MODEL || 'sonic-2';
+const CARTESIA_MODEL = process.env.CARTESIA_MODEL || 'sonic-turbo';
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 // Voice calls need low latency — Haiku 4.5 is ~40% faster than Sonnet for same quality on short-turn QA.
 const CLAUDE_MODEL = process.env.CLAUDE_MODEL || 'claude-haiku-4-5-20251001';

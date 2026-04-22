@@ -16,7 +16,10 @@
 const crypto = require("crypto");
 
 const CARTESIA_API_KEY = process.env.CARTESIA_API_KEY;
-const CARTESIA_MODEL = process.env.CARTESIA_MODEL || "sonic-2";
+// v8.6a: switched default to sonic-turbo — Cartesia's fastest tier.
+// Benchmarked 22-04 21:59 UTC: turbo 1.48s avg vs sonic-2 1.61s (~130ms saved per turn).
+// sonic-3 is richer but slightly slower (1.55s). We optimize for voice-call latency.
+const CARTESIA_MODEL = process.env.CARTESIA_MODEL || "sonic-turbo";
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 const MAX_CALL_SECONDS = parseInt(process.env.MAX_CALL_SECONDS || "360", 10);
 const MAX_EMPTY_GATHERS = 2;
