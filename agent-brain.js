@@ -87,6 +87,8 @@ const AGENT_CONFIGS = {
     complete_secret_env: "SALES_SHARED_SECRET",
     system_prompt: [
       "You are Priya, a Cars24 sales agent. Warm, energetic, consultative, and a practiced negotiator — you qualify buyers, hold price anchors, deflect pushback smoothly, and close toward a next step.",
+      "CRITICAL RULE: This is a VOICE CALL. Reply in ONE OR TWO SHORT SENTENCES — never more than 25 words per reply. Never list more than one car unless the caller explicitly asks for options.",
+      "NEVER address the caller by a name from the RECENT LEADS list — those are other customers, not this caller. If you don't have the caller's name, just say 'yes' or 'sure' or their question back, never guess a name.",
       "You have access to the caller's lead history and matching inventory in the CARS24 SALES CONTEXT block, and a PRE-CALL STRATEGIST PLAYBOOK with scene-specific tactics (ANCHOR, PUSHBACK-MOVES, CLOSE, HARD-LINES).",
       "BEHAVIOR: read the playbook before your first reply. Follow ANCHOR to lead with the right car. When the buyer pushes back, pick the matching PUSHBACK-MOVE; don't repeat yourself. Drive toward the CLOSE.",
       "NEGOTIATION INSTINCTS:",
@@ -142,6 +144,9 @@ const AGENT_CONFIGS = {
     complete_secret_env: "FINANCE_SHARED_SECRET",
     system_prompt: [
       "You are Vikram, Finance at Cars24. Analytical gravitas, precise, risk-aware — a CFO-office operator, not an accountant.",
+      "CRITICAL RULE: This is a VOICE CALL. Reply in ONE OR TWO SHORT SENTENCES — never more than 30 words per reply. Stop at one key number + one conclusion. If the exec wants more, they'll ask.",
+      "NEVER address the caller by any name. Do not infer a name from any context data. If uncertain, address them by role ('sir' or 'you') or just begin with the answer.",
+      "NEVER use bullets, asterisks, markdown, or tag labels. Plain conversational English that a person would say in a hallway brief.",
       "You have access to the CARS24 FINANCE CONTEXT (live P&L, pipeline, ops) and a PRE-CALL STRATEGIST BRIEF with TODAY-STATE, RED-FLAG, TOP-3-RECOMMENDATIONS, LOAN-ATTACH-LENS, and HARD-LINES.",
       "BEHAVIOR: read the strategist brief before your first reply. When the executive asks a general question, lead with the RED-FLAG and the single most important number. When asked 'what should we do?' — deliver the TOP-3-RECOMMENDATIONS in ranked order. When asked about loan attach or revenue growth, use the LOAN-ATTACH-LENS framing.",
       "DIAGNOSTIC FRAMEWORK (for every recommendation you give):",
@@ -452,14 +457,15 @@ function salesPreamble(ctx, buyerIntent) {
     );
   }
   lines.push("");
-  lines.push("RECENT LEADS (last 10):");
+  lines.push("RECENT LEADS (last 10) — DO NOT address the current caller by any of these names; they are past leads, not this caller:");
   for (const l of ctx.recent_leads.slice(0, 10)) {
     const budget =
       l.budget_min && l.budget_max
         ? `${inr(l.budget_min)}–${inr(l.budget_max)}`
         : "—";
+    // Strip customer_name; only lead_code + city + intent + budget
     lines.push(
-      `  ${l.lead_code}: ${l.customer_name} (${l.city}) wants to ${l.intent}, budget ${budget}, status ${l.status}`
+      `  ${l.lead_code}: ${l.city} — ${l.intent}, budget ${budget}, status ${l.status}`
     );
   }
   lines.push("");
@@ -622,7 +628,8 @@ async function runStrategist(agentId, preamble, extraContext) {
     systemPromptForStrategist = [
       "You are a senior Cars24 sales-coach who writes TACTICAL PLAYBOOKS for a voice AI sales agent named Priya.",
       "Your playbook will be used in real-time by a lower-latency model to hold a phone conversation with a buyer.",
-      "Output format: a terse, bulleted playbook under 350 tokens, ZERO prose, ZERO markdown headers.",
+      "Output format: plain text only, under 300 tokens total. NO markdown formatting of any kind — no asterisks, no hashes, no underscores, no code fences, no hyphens-as-bullets. Use line breaks between sections.",
+      "ABSOLUTELY NO customer names from any lead data — the playbook is advice for Priya, not a script that addresses the caller.",
       "Structure the playbook with these five tagged blocks, in this order, each starting with the tag in ALL CAPS on its own line:",
       "  CALLER-READ: 1-2 lines inferring caller situation from the intent and inventory match.",
       "  ANCHOR: which specific stock_id to lead with and why; which to hold in reserve as fallback.",
@@ -636,7 +643,8 @@ async function runStrategist(agentId, preamble, extraContext) {
     systemPromptForStrategist = [
       "You are a senior Cars24 finance strategist who writes DIAGNOSTIC RECOMMENDATION BRIEFS for a voice AI named Vikram.",
       "Your brief is used in real-time by a lower-latency model when an executive calls asking about P&L, EBITDA, loan book, or strategy.",
-      "Output format: a terse, ranked brief under 400 tokens, ZERO prose, ZERO markdown headers.",
+      "Output format: plain text only, under 350 tokens total. NO markdown formatting of any kind — no asterisks, no hashes, no underscores, no code fences, no hyphens-as-bullets. Use line breaks between sections.",
+      "ABSOLUTELY NO customer names from any context data — the brief is advice for Vikram, not a script that addresses a specific caller.",
       "Structure with these tagged blocks, each starting with the tag in ALL CAPS on its own line:",
       "  TODAY-STATE: 3 lines of the biggest operating numbers from the context, rounded to ₹Cr/L.",
       "  RED-FLAG: the single most important variance, with month-over-month direction and the likely root cause.",
@@ -700,7 +708,8 @@ async function callClaude(session, agent, userText) {
 
   const body = {
     model: agent.model,
-    max_tokens: 220,
+    // Voice turns must be brief. 120 tokens ≈ 2-3 tight sentences, matches the "SHORT" rule.
+    max_tokens: 120,
     system,
     messages,
   };
@@ -718,10 +727,25 @@ async function callClaude(session, agent, userText) {
     throw new Error("Claude " + resp.status + ": " + t.slice(0, 300));
   }
   const data = await resp.json();
-  const text = (data.content || [])
+  const rawText = (data.content || [])
     .filter((c) => c.type === "text")
     .map((c) => c.text)
     .join(" ")
+    .trim();
+  // Defensive sanitizer — strip markdown/formatting artifacts that TTS would read aloud.
+  // Covers: bold (**text**), italics (*text* and _text_), bullets, headers, code fences, ALL-CAPS tag blocks that leaked from strategist.
+  const text = rawText
+    .replace(/\*\*([^*]+)\*\*/g, "$1")       // **bold**
+    .replace(/(^|\s)\*(\S[^*]*?\S)\*/g, "$1$2") // *italic*
+    .replace(/(^|\s)_([^_]+)_(\s|$)/g, "$1$2$3") // _italic_
+    .replace(/^#{1,6}\s+/gm, "")              // # headers
+    .replace(/^[-*•]\s+/gm, "")              // leading bullets
+    .replace(/```[^`]*```/g, "")              // code fences
+    .replace(/`([^`]+)`/g, "$1")              // inline code
+    .replace(/\n{2,}/g, ". ")                 // collapse paragraph breaks into sentence breaks
+    .replace(/\s*\n\s*/g, " ")                // all other newlines to spaces
+    .replace(/\s{2,}/g, " ")                  // collapse whitespace
+    .replace(/^(CALLER-READ|ANCHOR|PUSHBACK-MOVES|CLOSE|HARD-LINES|TODAY-STATE|RED-FLAG|TOP-3-RECOMMENDATIONS|LOAN-ATTACH-LENS)[:\s].*$/gm, "") // strip any leaked strategist tag lines
     .trim();
   return text || "Sorry, I did not catch that. Could you repeat?";
 }
@@ -775,11 +799,13 @@ function playAndHangupTwiml(host, audioId) {
 function gatherTwiml({ host, agentId, call_id, playAudioId, fallbackSpeak }) {
   const actionUrl =
     "/agents/" + encodeURIComponent(agentId) + "/turn?call_id=" + encodeURIComponent(call_id);
+  // STT tuning: `phone_call` model handles Indian English accents more reliably than
+  // `experimental_conversations`. Fixed speechTimeout avoids premature cutoffs.
   const gatherOpen =
     '<Gather input="speech" action="' +
     actionUrl +
-    '" method="POST" language="en-IN" speechTimeout="auto" ' +
-    'speechModel="experimental_conversations" actionOnEmptyResult="true" timeout="6">';
+    '" method="POST" language="en-IN" speechTimeout="2" ' +
+    'speechModel="phone_call" actionOnEmptyResult="true" timeout="8" enhanced="true">';
   let inner = "";
   if (playAudioId) {
     inner = "<Play>https://" + host + "/ai/audio/" + playAudioId + ".mp3</Play>";
@@ -1052,7 +1078,17 @@ function mount(app, { cacheAudio }) {
     tlog(agent.id, "[USER] " + speech + " (conf=" + conf + ")");
 
     const lower = speech.toLowerCase();
-    if (/\b(good ?bye|bye|that'?s all|end (the )?call|hang up|thanks that'?s all)\b/.test(lower)) {
+    // Tight goodbye detection — must be explicit intent, not just the word 'bye' embedded in a longer sentence.
+    // STT frequently mis-transcribes Hindi 'kar' / 'ja' / 'karna' as 'bye'; a lone 'bye' inside a 5+ word sentence is almost never a real goodbye.
+    const saidGoodbye = (() => {
+      const words = lower.split(/\s+/).filter(Boolean);
+      // Only end on clear multi-word phrases
+      if (/\b(good ?bye|end (the |this )?call|hang up|thanks that'?s all|that'?s (it|all) for (now|today))\b/.test(lower)) return true;
+      // Accept 'bye' only if sentence is ≤3 words (real farewell like 'ok bye' or 'alright bye thanks')
+      if (/\bbye\b/.test(lower) && words.length <= 3) return true;
+      return false;
+    })();
+    if (saidGoodbye) {
       const closing = agent.closing || "Thanks for calling. Goodbye.";
       s.turns.push({ role: "assistant", text: closing, ts: new Date().toISOString() });
       try {
