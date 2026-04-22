@@ -696,12 +696,20 @@ function gatherTwiml({ host, agentId, call_id, playAudioId, fallbackSpeak }) {
   );
 }
 
+// Resolve the shared secret for a given agent.
+// Priority: the agent's own secret env var → COS_SHARED_SECRET (fallback, shared across Cars24 agents).
+function resolveAgentSecret(agent) {
+  if (agent.complete_secret_env) {
+    const own = process.env[agent.complete_secret_env];
+    if (own) return own;
+  }
+  return process.env.COS_SHARED_SECRET || "";
+}
+
 async function postCompleteIfNeeded(agent, session, reason) {
   if (session.completedPosted) return;
   session.completedPosted = true;
-  const secret = agent.complete_secret_env
-    ? process.env[agent.complete_secret_env] || ""
-    : "";
+  const secret = resolveAgentSecret(agent);
   if (!agent.complete_url) return;
   const duration = Math.round((Date.now() - session.startedAt) / 1000);
   const payload = {
@@ -763,7 +771,10 @@ function mount(app, { cacheAudio }) {
       cartesia: CARTESIA_API_KEY ? "set" : "missing",
       supabase: SUPABASE_URL && SUPABASE_SERVICE_KEY ? "set" : "missing",
       complete_url: agent.complete_url,
-      complete_secret: process.env[agent.complete_secret_env] ? "set" : "missing",
+      complete_secret: resolveAgentSecret(agent) ? "set" : "missing",
+      complete_secret_source: process.env[agent.complete_secret_env]
+        ? agent.complete_secret_env
+        : (process.env.COS_SHARED_SECRET ? "COS_SHARED_SECRET (fallback)" : "none"),
     });
   });
 

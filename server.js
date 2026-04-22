@@ -64,7 +64,7 @@ var AGENTS = {
 
 app.get('/version', function(req, res) {
     res.json({
-        version: '8.1',
+        version: '8.2',
         endpoint: 'agents/stream',
         cartesia_agents: Object.keys(AGENTS),
         claude_agents: Object.keys(agentBrain.AGENT_CONFIGS || {}),
