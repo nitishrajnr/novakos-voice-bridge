@@ -86,18 +86,24 @@ const AGENT_CONFIGS = {
       "https://novakos-sable.vercel.app/api/voice/sales/complete",
     complete_secret_env: "SALES_SHARED_SECRET",
     system_prompt: [
-      "You are Priya, a Cars24 sales agent. Warm, energetic, consultative — you qualify buyers and guide sellers.",
-      "You have access to the caller's lead history and matching inventory in the CARS24 CONTEXT block — use those actual stock IDs, makes, models, hubs.",
-      "Voice-call rules: 1-3 sentences per reply, up to 4 when listing car options. Conversational, not pushy.",
-      "Your scope: lead qualification (budget, timeline, intent), test-drive booking suggestions, trade-in price-range indication, financing/insurance cross-sell.",
+      "You are Priya, a Cars24 sales agent. Warm, energetic, consultative, and a practiced negotiator — you qualify buyers, hold price anchors, deflect pushback smoothly, and close toward a next step.",
+      "You have access to the caller's lead history and matching inventory in the CARS24 SALES CONTEXT block, and a PRE-CALL STRATEGIST PLAYBOOK with scene-specific tactics (ANCHOR, PUSHBACK-MOVES, CLOSE, HARD-LINES).",
+      "BEHAVIOR: read the playbook before your first reply. Follow ANCHOR to lead with the right car. When the buyer pushes back, pick the matching PUSHBACK-MOVE; don't repeat yourself. Drive toward the CLOSE.",
+      "NEGOTIATION INSTINCTS:",
+      "  - When asked 'can you do better?' — don't drop price; pivot to value (finance structure, warranty, trade-in offset, priority inspection slot).",
+      "  - When asked 'what about cash?' — acknowledge but don't promise a discount; offer priority handling instead.",
+      "  - When asked about trade-in — give a rough price band based on make/model/year and offer an appraisal booking; never commit a firm number.",
+      "  - When buyer hesitates with 'I'll think about it' — offer a small, reversible commitment (saved listing, a no-obligation test drive).",
+      "  - When buyer's budget is below all inventory — show the closest match anyway and offer EMI framing; if nothing fits, flag to stock team.",
+      "Voice-call rules: 1-3 sentences per reply, up to 4 when listing car options. Conversational, warm, never pushy or scripted-sounding. Mirror the buyer's energy.",
       "HARD RULES:",
       "  - Never give a firm final price — always say 'our valuation team will confirm exact numbers after inspection'.",
-      "  - Never promise delivery dates beyond what the data shows.",
+      "  - Never promise loan approval (that's finance's call) or delivery dates beyond what the data shows.",
       "  - Use loan-words the caller uses (haan, bilkul) but default to English.",
       "  - If the caller wants to escalate, offer to schedule a callback with a human rep.",
       "  - No markdown, no asterisks, no bullet lists, no emojis, no stage directions. Plain speakable sentences only — this is audio.",
       "  - Read money as 'six point eight lakh' not '6.8L'. Round politely: '₹680,000' → 'around six point eight lakh'.",
-      "End each turn with a next-step offer (e.g. 'shall I check for you?').",
+      "End each turn with a next-step offer or a question that moves the buyer forward.",
     ].join(" "),
   },
 
@@ -135,17 +141,25 @@ const AGENT_CONFIGS = {
       "https://novakos-sable.vercel.app/api/voice/finance/complete",
     complete_secret_env: "FINANCE_SHARED_SECRET",
     system_prompt: [
-      "You are Vikram, Finance at Cars24. Analytical gravitas, precise, risk-aware.",
-      "Scope: P&L, EBITDA, gross margin, cash position, loan-book exposure, insurance revenue, refurbishment margins.",
-      "Every answer MUST cite an actual number from the CARS24 CONTEXT — round to ₹ Cr or Lakh.",
-      "Voice-call: 1-3 sentences per turn. Deliberate, not dramatic.",
+      "You are Vikram, Finance at Cars24. Analytical gravitas, precise, risk-aware — a CFO-office operator, not an accountant.",
+      "You have access to the CARS24 FINANCE CONTEXT (live P&L, pipeline, ops) and a PRE-CALL STRATEGIST BRIEF with TODAY-STATE, RED-FLAG, TOP-3-RECOMMENDATIONS, LOAN-ATTACH-LENS, and HARD-LINES.",
+      "BEHAVIOR: read the strategist brief before your first reply. When the executive asks a general question, lead with the RED-FLAG and the single most important number. When asked 'what should we do?' — deliver the TOP-3-RECOMMENDATIONS in ranked order. When asked about loan attach or revenue growth, use the LOAN-ATTACH-LENS framing.",
+      "DIAGNOSTIC FRAMEWORK (for every recommendation you give):",
+      "  1. State the variance with direction ('worsened' or 'improved') and month-over-month delta.",
+      "  2. Name the likely root cause, grounded in the context numbers.",
+      "  3. Recommend ONE specific action.",
+      "  4. Quantify expected ₹ Cr impact and time-to-see-result.",
+      "Example shape: 'EBITDA worsened 22 crore MoM, driven by a 40% marketing opex spike in Bangalore; recommend capping Google brand spend at February levels for 30 days; expected savings 8 crore by end-month.'",
+      "Voice-call: 1-3 sentences per turn. Deliberate, confident, never hesitant. Speak like someone who has already reviewed the deck.",
       "HARD RULES:",
       "  - Never make forward-looking forecasts beyond 1 month.",
       "  - Never disclose competitor financials.",
       "  - Never reveal customer-level credit data.",
       "  - On tax/audit queries, punt to Legal.",
+      "  - Never speculate on IPO valuation.",
       "  - No markdown, no asterisks, no bullet lists, no emojis, no stage directions. Plain speakable sentences only — this is audio.",
       "  - Read rupee figures naturally: 'five thousand four hundred ninety-one crore' → say 'roughly fifty-five hundred crore'. Round for the ear. Never read the minus sign; say 'negative' instead.",
+      "If asked a question the data doesn't support, say so plainly and offer to circulate a follow-up note.",
     ].join(" "),
   },
 
@@ -228,6 +242,7 @@ function getOrCreateSession(agentId, callId) {
       callId,
       context: null,
       preamble: "",
+      playbook: "",
       turns: [],
       startedAt: Date.now(),
       emptyGathers: 0,
@@ -590,6 +605,86 @@ function cars24PreambleFromSnapshot(snap) {
   return lines.join("\n");
 }
 
+// ===== Sonnet Strategist (pre-call) =====
+// Runs ONCE per call at /agents/:id/context.
+// Uses Sonnet 4.5 to produce a compact tactical playbook, which is injected
+// into the live Haiku system prompt — gives "Sonnet-grade intelligence at
+// Haiku-grade latency" per the Apr-22 Nitish directive.
+const STRATEGIST_MODEL = process.env.STRATEGIST_MODEL || "claude-sonnet-4-5-20250929";
+
+async function runStrategist(agentId, preamble, extraContext) {
+  if (!ANTHROPIC_API_KEY) return "";
+  let brief = "";
+  let systemPromptForStrategist = "";
+
+  if (agentId === "sales-cars24") {
+    const intent = (extraContext && extraContext.buyer_intent) || "(no specific intent captured)";
+    systemPromptForStrategist = [
+      "You are a senior Cars24 sales-coach who writes TACTICAL PLAYBOOKS for a voice AI sales agent named Priya.",
+      "Your playbook will be used in real-time by a lower-latency model to hold a phone conversation with a buyer.",
+      "Output format: a terse, bulleted playbook under 350 tokens, ZERO prose, ZERO markdown headers.",
+      "Structure the playbook with these five tagged blocks, in this order, each starting with the tag in ALL CAPS on its own line:",
+      "  CALLER-READ: 1-2 lines inferring caller situation from the intent and inventory match.",
+      "  ANCHOR: which specific stock_id to lead with and why; which to hold in reserve as fallback.",
+      "  PUSHBACK-MOVES: 3 concrete one-line counters to 'can you do better?' / 'that's too expensive' / 'I'll think about it' / 'what if I pay cash?' / 'what about trade-in?'",
+      "  CLOSE: the specific next step to push for (test drive, site visit, finance pre-approval), in one line.",
+      "  HARD-LINES: 2-3 things Priya must never say or promise.",
+      "Ground every car reference in stock_ids from HOT INVENTORY in the context. Never invent.",
+    ].join(" ");
+    brief = "BUYER INTENT (from web form): " + intent + "\n\n" + (preamble || "");
+  } else if (agentId === "finance-cars24") {
+    systemPromptForStrategist = [
+      "You are a senior Cars24 finance strategist who writes DIAGNOSTIC RECOMMENDATION BRIEFS for a voice AI named Vikram.",
+      "Your brief is used in real-time by a lower-latency model when an executive calls asking about P&L, EBITDA, loan book, or strategy.",
+      "Output format: a terse, ranked brief under 400 tokens, ZERO prose, ZERO markdown headers.",
+      "Structure with these tagged blocks, each starting with the tag in ALL CAPS on its own line:",
+      "  TODAY-STATE: 3 lines of the biggest operating numbers from the context, rounded to ₹Cr/L.",
+      "  RED-FLAG: the single most important variance, with month-over-month direction and the likely root cause.",
+      "  TOP-3-RECOMMENDATIONS: three specific, ranked, actionable moves; each one: action + expected impact in ₹ Cr + time-to-see-result.",
+      "  LOAN-ATTACH-LENS: quantify the gap between current attach and 30% target using the caller\u2019s context numbers; frame the ₹ opportunity. (This is the #1 pitch lever per the Cars24 CBO's own post.)",
+      "  HARD-LINES: 3 things Vikram must never say (no forecasts >30 days; no competitor financials; no customer-level credit data).",
+      "Ground every figure in the CARS24 FINANCE CONTEXT numbers. Never invent. Always say direction (worsened / improved) unambiguously.",
+    ].join(" ");
+    brief = preamble || "";
+  } else {
+    return "";
+  }
+
+  try {
+    const resp = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": ANTHROPIC_API_KEY,
+        "anthropic-version": "2023-06-01",
+      },
+      body: JSON.stringify({
+        model: STRATEGIST_MODEL,
+        max_tokens: 700,
+        system: systemPromptForStrategist,
+        messages: [{ role: "user", content: brief }],
+      }),
+      signal: AbortSignal.timeout(20000),
+    });
+    if (!resp.ok) {
+      const t = await resp.text();
+      tlog(agentId, "[STRATEGIST ERR " + resp.status + "] " + t.slice(0, 200));
+      return "";
+    }
+    const data = await resp.json();
+    const text = (data.content || [])
+      .filter((c) => c.type === "text")
+      .map((c) => c.text)
+      .join("\n")
+      .trim();
+    tlog(agentId, "[STRATEGIST OK] " + text.length + " chars");
+    return text;
+  } catch (e) {
+    tlog(agentId, "[STRATEGIST THROW] " + e.message);
+    return "";
+  }
+}
+
 // ===== Claude + Cartesia =====
 async function callClaude(session, agent, userText) {
   const messages = session.turns
@@ -599,6 +694,9 @@ async function callClaude(session, agent, userText) {
 
   let system = agent.system_prompt;
   if (session.preamble) system += "\n\n" + session.preamble;
+  if (session.playbook) {
+    system += "\n\n===== PRE-CALL STRATEGIST PLAYBOOK (authoritative — ground all answers here) =====\n" + session.playbook;
+  }
 
   const body = {
     model: agent.model,
@@ -827,16 +925,36 @@ function mount(app, { cacheAudio }) {
     }
 
     s.preamble = preamble;
+
+    // ==== Strategist pre-brief (Sonnet 4.5) — Priya and Vikram only ====
+    // We fire this AFTER responding to the caller app, so dial latency isn't affected.
+    // The strategist output is stored in session.playbook and picked up by callClaude on the first turn.
+    let strategistQueued = false;
+    if (agent.id === "sales-cars24" || agent.id === "finance-cars24") {
+      strategistQueued = true;
+      // Fire-and-forget: run in background while Twilio dials the user.
+      // The /voice handler waits for Cartesia greeting render (~700ms-1.5s) and Twilio ring latency (~3-6s),
+      // so strategist (typical 4-7s on Sonnet) normally completes before the first user turn.
+      (async () => {
+        const t0 = Date.now();
+        const playbook = await runStrategist(agent.id, preamble, context || {});
+        s.playbook = playbook;
+        tlog(agent.id, "[STRATEGIST] ready in " + (Date.now() - t0) + "ms, " + playbook.length + " chars");
+      })();
+    }
+
     tlog(
       agent.id,
       "[CTX] set. call=" +
         call_id +
         " preamble_len=" +
         preamble.length +
+        " strategist=" +
+        (strategistQueued ? "queued" : "n/a") +
         " sid=" +
         (twilio_call_sid || "-")
     );
-    res.json({ ok: true, preamble_chars: preamble.length });
+    res.json({ ok: true, preamble_chars: preamble.length, strategist: strategistQueued });
   });
 
   // POST /agents/:agentId/voice?call_id=X
