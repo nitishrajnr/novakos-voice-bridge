@@ -17,6 +17,10 @@ const CARTESIA_API_KEY = process.env.CARTESIA_API_KEY;
 const aiBrain = require('./ai-brain');
 aiBrain.mount(app);
 
+// v8.0 — Multi-agent voice brain (/agents/:agentId/*) for NovakOS pitch demos
+const agentBrain = require('./agent-brain');
+agentBrain.mount(app, { cacheAudio: aiBrain.cacheAudio });
+
 // Call log for debugging
 var lastCallLog = [];
 function log(msg) {
@@ -60,10 +64,11 @@ var AGENTS = {
 
 app.get('/version', function(req, res) {
     res.json({
-        version: '7.0',
+        version: '8.0',
         endpoint: 'agents/stream',
-        agents: Object.keys(AGENTS),
-        features: ['cartesia-agents', 'dispatch', 'ai-brain (/ai/*)'],
+        cartesia_agents: Object.keys(AGENTS),
+        claude_agents: Object.keys(agentBrain.AGENT_CONFIGS || {}),
+        features: ['cartesia-agents', 'dispatch', 'ai-brain (/ai/*)', 'agent-brain (/agents/:agentId/*)'],
     });
 });
 

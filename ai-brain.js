@@ -431,4 +431,4 @@ function mount(app) {
   });
 }
 
-module.exports = { mount };
+module.exports = { mount, cacheAudio };

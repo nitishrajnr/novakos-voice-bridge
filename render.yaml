@@ -30,3 +30,14 @@ services:
         sync: false
       - key: MAX_CALL_SECONDS
         value: "300"
+      # --- v8.0 multi-agent brain ---
+      - key: SUPABASE_URL
+        value: https://uahllbyyejwlfonwhfzd.supabase.co
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: COS_COMPLETE_URL
+        value: https://novakos-sable.vercel.app/api/voice/cos/complete
+      - key: COS_SHARED_SECRET
+        sync: false
+      - key: COS_MODEL
+        value: claude-haiku-4-5-20251001
