@@ -21,7 +21,8 @@ const CARTESIA_API_KEY = process.env.CARTESIA_API_KEY;
 const CARTESIA_VOICE_ID = process.env.CARTESIA_VOICE_ID || '3b59a3aa-f616-4501-a365-c1ba7ac37874';
 const CARTESIA_MODEL = process.env.CARTESIA_MODEL || 'sonic-2';
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
-const CLAUDE_MODEL = process.env.CLAUDE_MODEL || 'claude-sonnet-4-5-20250929';
+// Voice calls need low latency — Haiku 4.5 is ~40% faster than Sonnet for same quality on short-turn QA.
+const CLAUDE_MODEL = process.env.CLAUDE_MODEL || 'claude-haiku-4-5-20251001';
 const GB_COMPLETE_URL = process.env.GB_COMPLETE_URL || 'https://garmentbridge.vercel.app/api/voice/complete';
 const GB_SHARED_SECRET = process.env.GB_SHARED_SECRET || '';
 const MAX_CALL_SECONDS = parseInt(process.env.MAX_CALL_SECONDS || '300', 10);
@@ -57,6 +58,12 @@ const SYSTEM_PROMPT = [
   'You help authenticated users with: (a) checking order status and production timelines,',
   '(b) answering questions about their vendors/factories, (c) quality inspection queries,',
   '(d) sourcing advice (fabric types, MOQ, lead times).',
+  'IMPORTANT: You DO have real-time access to the caller\'s order data — it is provided in the',
+  'USER CONTEXT block below. When asked about orders, ALWAYS check that context first and answer',
+  'with the specific order numbers, styles, stages, factories, and delivery dates shown there.',
+  'Never say "I don\'t have access to your database" — the data is right there in your context.',
+  'If a caller mentions an order number that does NOT appear in the context, THEN politely say',
+  'you can\'t locate that specific order and suggest they check the dashboard.',
   'Be professional, concise, warm. Speak naturally like a phone assistant — not like a chatbot.',
   'Responses MUST be SHORT (1-3 sentences) because this is a voice call over a phone line.',
   'Use Hindi loan-words if the user uses them (haan, theek hai, bilkul), but default to English.',
@@ -91,14 +98,18 @@ function buildContextPreamble(context) {
   if (context.org_name) parts.push('Organisation: ' + context.org_name + '.');
   if (context.account_manager) parts.push('Account manager: ' + context.account_manager + '.');
   if (Array.isArray(context.orders) && context.orders.length) {
-    parts.push('Recent orders:');
+    parts.push('Recent orders (' + context.orders.length + '):');
     context.orders.slice(0, 5).forEach((o, i) => {
       parts.push('  ' + (i + 1) + '. ' + [
         o.po_number || o.order_number || o.id,
         o.style_name,
+        o.category ? '(' + o.category + ')' : null,
+        o.quantity ? 'qty: ' + o.quantity : null,
         'status: ' + (o.status || 'unknown'),
+        o.current_stage ? 'stage: ' + o.current_stage : null,
         o.factory_name ? 'factory: ' + o.factory_name : null,
-        o.expected_date ? 'expected: ' + o.expected_date : null,
+        o.expected_date ? 'delivery: ' + o.expected_date : null,
+        o.quality_score !== null && o.quality_score !== undefined ? 'quality: ' + o.quality_score : null,
       ].filter(Boolean).join(' | '));
     });
   }
@@ -305,14 +316,26 @@ function mount(app) {
       s.emptyGathers += 1;
       tlog(call_id, '[TURN] empty gather #' + s.emptyGathers);
       if (s.emptyGathers >= MAX_EMPTY_GATHERS) {
+        const bye = 'I did not hear anything. Goodbye for now.';
         await postCompleteIfNeeded(call_id, 'silence');
-        return res.type('text/xml').send(hangupTwiml('I did not hear anything. Goodbye for now.'));
+        try {
+          const audioId = await renderAndCache(bye);
+          return res.type('text/xml').send(
+            '<?xml version="1.0" encoding="UTF-8"?><Response>' +
+            '<Play>https://' + host + '/ai/audio/' + audioId + '.mp3</Play><Hangup/></Response>'
+          );
+        } catch {
+          return res.type('text/xml').send(hangupTwiml(bye));
+        }
       }
-      // Re-prompt briefly with Twilio voice (no need to Cartesia-render).
-      return res.type('text/xml').send(gatherTwiml({
-        host, call_id,
-        fallbackSpeak: s.emptyGathers === 1 ? 'Sorry, I did not catch that. Could you try again?' : 'Still there?',
-      }));
+      // Re-prompt with Cartesia voice (consistent voice throughout the call)
+      const reprompt = s.emptyGathers === 1 ? 'Sorry, I did not catch that. Could you try again?' : 'Still there?';
+      try {
+        const audioId = await renderAndCache(reprompt);
+        return res.type('text/xml').send(gatherTwiml({ host, call_id, playAudioId: audioId }));
+      } catch {
+        return res.type('text/xml').send(gatherTwiml({ host, call_id, fallbackSpeak: reprompt }));
+      }
     }
 
     s.emptyGathers = 0;
