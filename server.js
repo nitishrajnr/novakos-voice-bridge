@@ -64,12 +64,12 @@ var AGENTS = {
 
 app.get('/version', function(req, res) {
     res.json({
-        version: '8.6a',
+        version: '8.7',
         endpoint: 'agents/stream',
         cartesia_agents: Object.keys(AGENTS),
         claude_agents: Object.keys(agentBrain.AGENT_CONFIGS || {}),
         live_claude_agents: ['cos-cars24', 'sales-cars24', 'finance-cars24'],
-        features: ['cartesia-agents', 'dispatch', 'ai-brain (/ai/*)', 'agent-brain (/agents/:agentId/*)', 'sales+finance context fetchers'],
+        features: ['cartesia-agents', 'dispatch', 'ai-brain (/ai/*)', 'agent-brain (/agents/:agentId/*)', 'sales+finance context fetchers', 'arjun-context-scan-before-decline (v8.7)'],
     });
 });
 
